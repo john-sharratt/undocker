@@ -1,44 +1,43 @@
 #!/bin/bash -e
 
+RUNDIR=$(pwd)
 if [ -z "$1" ]; then
-  echo "You must provide an image name" 1>&2
+  echo "you must provide an image name" 1>&2
   exit 1
 fi
 if [ -z "$2" ]; then
-  echo "Your must provide a tag" 1>&2
-  exit 1
+  tag="latest"
+else
+  tag=$2
 fi
-if [ -z "$3" ]; then
-  echo "Your must provide an output folder" 1>&2
-  exit 1
-fi
+name=$1
 
 # Grab a token
-echo -n "Acquiring a login token..."
-token="$(curl -sL -o /dev/null -D- -H 'X-Docker-Token: true' "https://index.docker.io/v1/repositories/$1/images" | tr -d '\r' | awk -F ': *' '$1 == "X-Docker-Token" { print $2 }')"
+echo -n "acquiring a login token..."
+token=$(curl -G -sL https://auth.docker.io/token --data-urlencode "service=registry.docker.io" --data-urlencode "scope=repository:$name:pull" | jq .token | xargs)
 echo "Done"
 
-# Attempt to read the ID of the container
-echo -n "Reading image ID..."
-registry='https://registry-1.docker.io/v1'
-id="$(curl -sL -H "Authorization: Token $token" "$registry/repositories/$1/tags/$2" | sed 's/"//g')"
-if [[ "${#id}" -ne 64 ]]; then
+# Attempt to read all the layers for this image
+echo -n "reading image ID..."
+registry='https://index.docker.io/v2'
+layers=$(curl -s -H "Authorization: Bearer $token" $registry/$name/manifests/$tag | jq -M .fsLayers[].blobSum | sed 's|"||g')
+if [ -z "$layers" ]; then
 
   # If it fails then return all the tags
   echo "Failed"
-  echo "Could not locate image $1:$2... trying to list tags"
-  curl -sL -H "Authorization: Token $token" "$registry/repositories/$1/tags" | jq -M .
+  echo "Could not locate image $name [tag=$tag]"
   exit 1
 fi
-echo $id
+echo "Ok"
 
 # Now loop loading all the images
-echo "extracting image $1:$2 ($id)"
-ancestry="$(curl -sL -H "Authorization: Token $token" "$registry/images/$id/ancestry")"
-IFS=',' && ancestry=(${ancestry//[\[\] \"]/}) && IFS=' \n\t' && mkdir -p $3
-for id in "${ancestry[@]}"; do
-  echo "extracting layer $id"
-  curl -#L -H "Authorization: Token $token" "$registry/images/$id/layer" | tar -xvz
+echo "extracting image $name [tag=$tag]"
+for layer in $layers; do
+  echo "extracting layer $layer"
+
+  curl -sL -H "Authorization: Bearer $token" $registry/$name/blobs/$layer | tar -xz
+  find . -type f -name ".wh.*" | sed 's|/.wh.||g' | xargs rm -f
+  find . -type f -name ".wh.*" | xargs rm -f
 done
 
 # Success
